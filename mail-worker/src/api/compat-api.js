@@ -3,7 +3,7 @@ import orm from '../entity/orm';
 import email from '../entity/email';
 import userService from '../service/user-service';
 import accountService from '../service/account-service';
-import { eq, and, desc, sql } from 'drizzle-orm';
+import { eq, and, desc, sql, or } from 'drizzle-orm';
 import dayjs from 'dayjs';
 
 function checkAuth(c) {
@@ -30,6 +30,18 @@ function getEffectiveDomain(c, requestedDomain) {
 		return String(domains[0]).replace(/^@/, '').toLowerCase().trim();
 	}
 	return '';
+}
+
+function formatReceivedDateTime(dateStr) {
+	if (!dateStr) return new Date().toISOString();
+	let s = String(dateStr).trim();
+	if (s.includes(' ') && !s.includes('T')) {
+		s = s.replace(' ', 'T');
+	}
+	if (!s.endsWith('Z') && !s.includes('+')) {
+		s += 'Z';
+	}
+	return s;
 }
 
 // 批量创建临时邮箱（同时兼容 /mailboxes 和 /emails 路径）
@@ -93,40 +105,57 @@ app.get('/messages', async (c) => {
 	const targetEmail = (c.req.query('email') || c.req.query('address') || c.req.query('to_address') || '').trim().toLowerCase();
 	const limit = Math.min(Math.max(parseInt(c.req.query('limit') || 25), 1), 100);
 
-	if (!targetEmail) {
-		return c.json({ code: 200, success: true, data: [] });
+	let query = orm(c)
+		.select({
+			emailId: email.emailId,
+			toEmail: email.toEmail,
+			sendEmail: email.sendEmail,
+			subject: email.subject,
+			content: email.content,
+			text: email.text,
+			code: email.code,
+			createTime: email.createTime
+		})
+		.from(email);
+
+	if (targetEmail && targetEmail !== 'all') {
+		query = query.where(
+			or(
+				sql`${email.toEmail} COLLATE NOCASE = ${targetEmail}`,
+				sql`${email.toEmail} COLLATE NOCASE LIKE ${'%' + targetEmail + '%'}`
+			)
+		);
 	}
 
-	const rows = await orm(c)
-		.select({
-			id: email.emailId,
-			message_id: email.emailId,
-			to: email.toEmail,
-			to_address: email.toEmail,
-			recipient: email.toEmail,
-			from: email.sendEmail,
-			sender: email.sendEmail,
-			from_address: email.sendEmail,
-			subject: email.subject,
-			body: email.content,
-			text: email.text,
-			content: email.content,
-			created_at: email.createTime,
-			receivedDateTime: email.createTime
-		})
-		.from(email)
-		.where(
-			and(
-				sql`${email.toEmail} COLLATE NOCASE = ${targetEmail}`,
-				eq(email.type, 0)
-			)
-		)
-		.orderBy(desc(email.emailId))
-		.limit(limit);
+	const rawRows = await query.orderBy(desc(email.emailId)).limit(limit);
+
+	const formattedRows = rawRows.map(r => {
+		const isoTime = formatReceivedDateTime(r.createTime);
+		const bodyContent = r.content || r.text || '';
+		return {
+			id: String(r.emailId),
+			message_id: String(r.emailId),
+			to: r.toEmail,
+			to_address: r.toEmail,
+			recipient: r.toEmail,
+			from: r.sendEmail,
+			sender: r.sendEmail,
+			from_address: r.sendEmail,
+			subject: r.subject || '',
+			bodyPreview: (r.text || r.content || '').substring(0, 500),
+			body: bodyContent,
+			text: r.text || r.content || '',
+			content: bodyContent,
+			code: r.code || '',
+			created_at: isoTime,
+			receivedDateTime: isoTime,
+			received_at: isoTime
+		};
+	});
 
 	return c.json({
 		code: 200,
 		success: true,
-		data: rows
+		data: formattedRows
 	});
 });
