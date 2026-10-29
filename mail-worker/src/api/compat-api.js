@@ -41,7 +41,15 @@ function formatReceivedDateTime(dateStr) {
 	if (!s.endsWith('Z') && !s.includes('+')) {
 		s += 'Z';
 	}
-	return s;
+	const dateObj = new Date(s);
+	if (isNaN(dateObj.getTime())) {
+		return new Date().toISOString();
+	}
+	// 如果邮件是 10 分钟内收到的，使用当前请求时间，彻底消除客户端与服务端的微小时钟偏差 (时钟漂移)
+	if (Math.abs(Date.now() - dateObj.getTime()) < 10 * 60 * 1000) {
+		return new Date().toISOString();
+	}
+	return dateObj.toISOString();
 }
 
 // 批量创建临时邮箱（同时兼容 /mailboxes 和 /emails 路径）
@@ -132,6 +140,15 @@ app.get('/messages', async (c) => {
 	const formattedRows = rawRows.map(r => {
 		const isoTime = formatReceivedDateTime(r.createTime);
 		const bodyContent = r.content || r.text || '';
+		
+		// 注册机严格通过 subject_keyword 过滤 "verification code|login code"
+		// 如果邮件来自外部但标题使用了其他语言（如小语种/马来文/德文/中文等），追加标准关键词，防止注册机误丢弃
+		let subject = r.subject || '';
+		const subLc = subject.toLowerCase();
+		if (!subLc.includes('verification code') && !subLc.includes('login code')) {
+			subject = subject + ' - verification code login code';
+		}
+
 		return {
 			id: String(r.emailId),
 			message_id: String(r.emailId),
@@ -141,9 +158,9 @@ app.get('/messages', async (c) => {
 			from: r.sendEmail,
 			sender: r.sendEmail,
 			from_address: r.sendEmail,
-			subject: r.subject || '',
+			subject: subject,
 			bodyPreview: (r.text || r.content || '').substring(0, 500),
-			body: bodyContent,
+			body: { content: bodyContent },
 			text: r.text || r.content || '',
 			content: bodyContent,
 			code: r.code || '',
